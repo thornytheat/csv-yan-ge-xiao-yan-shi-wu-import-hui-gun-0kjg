@@ -1,0 +1,82 @@
+{# 冲突订单清单 + 回滚前旧账快照（需要上下文里的 result） #}
+{% if result and result.status == 'conflict' %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>冲突订单（{{ result.conflicts | length }} 个）</h2>
+    <div class="panel-actions"><span class="tag err">整份回滚 · 写入 0 行</span></div>
+  </div>
+  <div class="table-wrap roomy">
+    <table class="dense">
+      <thead>
+        <tr>
+          <th class="num">订单号</th><th>冲突类型</th>
+          <th class="num">原件数</th><th class="num">历史已退</th><th class="num">本文件</th><th class="num">超出</th>
+          <th class="num">原金额</th><th class="num">历史已退金额</th><th class="num">本文件金额</th><th class="num">超出金额</th>
+          <th>文件行号</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in result.conflicts %}
+        <tr>
+          <td class="num"><b>{{ c.order_id }}</b></td>
+          <td><span class="tag err">{{ c.label }}</span></td>
+          <td class="num">{{ c.order_qty if c.order_qty is not none else '—' }}</td>
+          <td class="num">{{ c.already_qty }}</td>
+          <td class="num">{{ c.requested_qty }}</td>
+          <td class="num">{% if c.exceeded_qty %}<b class="err">{{ c.exceeded_qty }}</b>{% else %}0{% endif %}</td>
+          <td class="num">¥{{ c.order_amount if c.order_amount is not none else '—' }}</td>
+          <td class="num">¥{{ c.already_amount }}</td>
+          <td class="num">¥{{ c.requested_amount }}</td>
+          <td class="num">{% if c.exceeded_amount_cents %}<b class="err">¥{{ c.exceeded_amount }}</b>{% else %}¥0.00{% endif %}</td>
+          <td class="small">{{ c.line_nos | join(', ') }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="panel-body tight">
+    <p class="small muted" style="margin:0">口径：原件数/原金额取自历史已入账订单；历史已退为库内累计；本文件为该订单在本次文件中的合计（同一订单多行会先合并再判）。任一超出即整份文件回滚。</p>
+  </div>
+</section>
+
+{% if result.previous_summary %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>回滚前旧账快照（{{ result.previous_summary.captured_at }}）</h2>
+    <div class="panel-actions"><span class="tag ok">旧汇总与旧台账未被改写</span></div>
+  </div>
+  <div class="table-wrap roomy">
+    <table class="dense">
+      <thead><tr><th>站点</th><th class="num">累计件数</th><th class="num">累计退款</th><th class="num">明细行数</th></tr></thead>
+      <tbody>
+        {% for s in result.previous_summary.sites %}
+        <tr>
+          <td>{{ s.site }}</td>
+          <td class="num">{{ s.qty }}</td>
+          <td class="num">¥{{ s.amount }}</td>
+          <td class="num">{{ s.row_count }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="table-wrap roomy">
+    <table class="dense">
+      <thead><tr><th class="num">订单号</th><th class="num">原件数</th><th class="num">已退件数</th><th class="num">剩余件数</th><th class="num">已退金额</th><th class="num">剩余金额</th></tr></thead>
+      <tbody>
+        {% for o in result.previous_summary.orders %}
+        <tr>
+          <td class="num">{{ o.order_id }}</td>
+          <td class="num">{{ o.order_qty if o.order_qty is not none else '—' }}</td>
+          <td class="num">{{ o.qty_returned }}</td>
+          <td class="num">{{ o.qty_remaining if o.qty_remaining is not none else '—' }}</td>
+          <td class="num">¥{{ o.amount_returned }}</td>
+          <td class="num">¥{{ o.amount_remaining }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+{% endif %}

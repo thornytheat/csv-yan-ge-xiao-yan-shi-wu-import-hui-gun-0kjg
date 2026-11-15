@@ -11,7 +11,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import contract, pipeline, report, seed, settings, store
+from . import (contract, pipeline, report, return_pipeline, returns, seed, settings,
+               store)
 
 MAX_BYTES = 8 * 1024 * 1024
 
@@ -21,6 +22,7 @@ STATUS_HTTP = {
     "rejected": 422,
     "encoding_failed": 400,
     "rolled_back": 500,
+    "conflict": 409,
 }
 
 
@@ -92,6 +94,8 @@ def index(request: Request):
     try:
         recent = store.list_batches(conn, limit=5)
         attempts = store.list_attempts(conn, limit=5)
+        return_stats = store.return_stats(conn)
+        return_summary = store.return_site_summary(conn)
     finally:
         conn.close()
     return _render(request, "index.html", {
@@ -99,6 +103,8 @@ def index(request: Request):
         "page": "index",
         "recent_batches": recent,
         "recent_attempts": attempts,
+        "return_stats": return_stats,
+        "return_summary": return_summary,
         "contract_columns": contract.COLUMN_SPECS,
         "required": contract.REQUIRED,
     })
@@ -281,6 +287,9 @@ def review(request: Request):
         batches = store.list_batches(conn, limit=30)
         attempts = store.list_attempts(conn, limit=30)
         stats = store.stats(conn)
+        return_batches = store.list_return_batches(conn, limit=30)
+        return_attempts = store.list_return_attempts(conn, limit=30)
+        return_stats = store.return_stats(conn)
     finally:
         conn.close()
     for attempt in attempts:
@@ -291,6 +300,9 @@ def review(request: Request):
         "batches": batches,
         "attempts": attempts,
         "stats": stats,
+        "return_batches": return_batches,
+        "return_attempts": return_attempts,
+        "return_stats": return_stats,
     })
 
 
@@ -373,6 +385,172 @@ def api_batches():
         return {"batches": store.list_batches(conn, limit=50), "stats": store.stats(conn)}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------- 退货
+
+
+def _return_public_result(result: dict) -> dict:
+    return dict(result)
+
+
+@app.post("/api/returns/import")
+async def api_returns_import(
+    file: UploadFile = File(...),
+    extra_policy: str = Form("reject"),
+    declared_site: str = Form(""),
+):
+    raw = await _read_upload(file)
+    conn = get_conn()
+    try:
+        result = return_pipeline.run_returns(
+            raw, file.filename or "returns.csv", extra_policy=extra_policy,
+            declared_site=declared_site.strip(), conn=conn,
+        )
+    finally:
+        conn.close()
+    return JSONResponse(_return_public_result(result),
+                        status_code=STATUS_HTTP.get(result["status"], 400))
+
+
+@app.get("/api/returns")
+def api_returns():
+    conn = get_conn()
+    try:
+        return {
+            "summary": store.return_site_summary(conn),
+            "stats": store.return_stats(conn),
+            "batches": store.list_return_batches(conn, limit=50),
+            "attempts": store.list_return_attempts(conn, limit=50),
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/returns/order/{order_id}")
+def api_return_order(order_id: int):
+    conn = get_conn()
+    try:
+        ledger = store.return_order_ledger(conn, order_id)
+        order = store.find_order_canonical(conn, order_id)
+        if not ledger and order is None:
+            raise HTTPException(status_code=404, detail=f"订单 {order_id} 不存在")
+        return {
+            "order_id": order_id,
+            "order": dict(order) if order else None,
+            "ledger": ledger,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/returns", response_class=HTMLResponse)
+def returns_page(request: Request):
+    conn = get_conn()
+    try:
+        summary = store.return_site_summary(conn)
+        batches = store.list_return_batches(conn, limit=30)
+        attempts = store.list_return_attempts(conn, limit=30)
+        ledger = store.return_ledger(conn, limit=50)
+        return_stats = store.return_stats(conn)
+    finally:
+        conn.close()
+    return _render(request, "returns.html", {
+        "active": "returns",
+        "page": "returns",
+        "summary": summary,
+        "batches": batches,
+        "attempts": attempts,
+        "ledger": ledger,
+        "return_stats": return_stats,
+        "return_samples": settings.RETURN_SAMPLE_FILES,
+        "return_columns": list(returns.RETURN_COLUMN_SPECS.items()),
+        "sites": contract.SITES,
+    })
+
+
+@app.post("/returns", response_class=HTMLResponse)
+async def returns_submit(
+    request: Request,
+    file: UploadFile = File(...),
+    extra_policy: str = Form("reject"),
+    declared_site: str = Form(""),
+):
+    raw = await _read_upload(file)
+    conn = get_conn()
+    try:
+        result = return_pipeline.run_returns(
+            raw, file.filename or "returns.csv", extra_policy=extra_policy,
+            declared_site=declared_site.strip(), conn=conn,
+        )
+        summary = store.return_site_summary(conn)
+        batches = store.list_return_batches(conn, limit=30)
+        attempts = store.list_return_attempts(conn, limit=30)
+        ledger = store.return_ledger(conn, limit=50)
+        return_stats = store.return_stats(conn)
+    finally:
+        conn.close()
+
+    status_code = STATUS_HTTP.get(result["status"], 400)
+    return _render(request, "returns.html", {
+        "active": "returns",
+        "page": "returns",
+        "result": result,
+        "summary": summary,
+        "batches": batches,
+        "attempts": attempts,
+        "ledger": ledger,
+        "return_stats": return_stats,
+        "return_samples": settings.RETURN_SAMPLE_FILES,
+        "return_columns": list(returns.RETURN_COLUMN_SPECS.items()),
+        "sites": contract.SITES,
+        "error": result.get("detail", "") if result["status"] not in (
+            "committed", "duplicate_file") else "",
+    }, status_code=status_code)
+
+
+@app.post("/api/returns/contract-check")
+async def api_return_contract_check(request: Request):
+    body = await request.json()
+    header_line = (body.get("header") or "").strip()
+    policy = body.get("extra_policy") or "reject"
+    if not header_line:
+        return JSONResponse({"detail": "请粘贴退货表头行"}, status_code=400)
+    cells = [c for c in header_line.replace("\t", ",").split(",")]
+    result = returns.check_contract(cells, policy)
+    result.pop("column_contract", None)
+    return result
+
+
+@app.post("/api/returns/replay-check")
+async def api_return_replay_check(request: Request):
+    body = await request.json()
+    sha = (body.get("sha256") or "").strip().lower()
+    if len(sha) != 64:
+        return JSONResponse({"detail": "sha256 需为 64 位十六进制"}, status_code=400)
+    conn = get_conn()
+    try:
+        existing = store.find_return_batch_by_sha(conn, sha)
+        count = store.count_return_rows(conn)
+    finally:
+        conn.close()
+    if existing:
+        return {
+            "sha256": sha,
+            "verdict": "duplicate_file",
+            "return_batch_id": existing["return_batch_id"],
+            "message": (f"同文件已入账为 {existing['return_batch_id']}"
+                        f"（{existing['filename']}，{existing['row_count']} 行）。"
+                        "重试不会重复入账。"),
+            "return_rows": count,
+        }
+    return {
+        "sha256": sha,
+        "verdict": "new_file",
+        "return_batch_id": None,
+        "message": "库中没有该 sha256，上传会作为新退货批次正常入账。",
+        "return_rows": count,
+    }
 
 
 @app.get("/api/samples/{name}")

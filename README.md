@@ -18,6 +18,39 @@
 
 编排在 `app/pipeline.py`，路由 `app/main.py` 只做参数解析与渲染。
 
+## 退货入账（订单到货后的第二段流程）
+
+退货 CSV 是**另一份文件、另一套契约**（`app/returns.py`）：主键是 `return_id`，
+每行用 `order_id` 指向已入账的历史订单。入口：`/returns` 页面、`POST /api/returns/import`。
+
+| 模块 | 落地位置 | 做什么 |
+|---|---|---|
+| 退货契约 / 行校验 / 聚合 | `app/returns.py` | 7 个必需列 + 可选 `memo`；退货单号严格递增；日期/金额/枚举规则与订单一致；按站点 + 按订单双口径汇总并自证 |
+| 退货事务入账 | `app/return_importer.py` | 单事务内核对累计上限、写明细/站点汇总/订单台账；冲突整份回滚；sha256 幂等 |
+| 退货编排 | `app/return_pipeline.py` | 编码探测 → 契约 → 行校验 → 聚合 → 事务入账 |
+| 退货页面 | `templates/returns.html` | 上传、站点累计汇总、订单累计台账、批次与上传记录、冲突清单与回滚前快照 |
+
+核心规则：
+
+1. **各站点独立提交**：一份退货文件只允许一个站点，混站文件直接拒绝（`422`，
+   `stage=return_site`）；也可填 `declared_site` 做预校验，与文件内容不一致即拒绝。
+   不同站点的文件互不影响。
+2. **同一订单累计受控**：每次入账都在 `BEGIN IMMEDIATE` 写事务里按 `order_id` 合并本文件各行，
+   再核对「历史已退 + 本文件」是否超过原始订单的件数与金额。上限在**首次退货时冻结**到
+   `return_order_totals`，之后即使订单被 `force_new_batch` 重灌也不放宽。
+3. **并发安全**：SQLite 写锁把并发提交串行化，第二个事务看到的是第一次提交后的累计值；
+   同 sha256 并发提交由事务内二次判重 + `return_batches.sha256` 唯一索引兜底，只入账一次。
+4. **越界整份回滚**：任一订单越界 → 整份文件 0 行写入（合法行也不入账），返回 `409` 与冲突订单清单
+   （原件数/原金额、历史已退、本文件请求、超出量、文件行号），并保留上传前的站点汇总与订单台账快照，
+   可证明旧汇总和旧账未被改写。
+5. **重试幂等**：同一份文件（sha256 相同）重复提交 → `duplicate_file`，写入 0 行，累计值不变。
+6. **中途失败**：批次、明细、站点汇总、订单台账在同一事务；任一步异常 → `ROLLBACK`，
+   退货明细行数、站点汇总、订单台账全部保持旧值。
+
+退货样例：`return_beijing_1.csv`（成功）、`return_beijing_2_conflict.csv`（件数+金额越界）、
+`return_shanghai_1.csv`（另一站点独立提交）、`return_shanghai_2_amount_conflict.csv`（仅金额越界）、
+`return_multi_site.csv`（混站拒绝）。均引用 seed 历史订单 700001~700060。
+
 ## 核心规则
 
 1. **编码探测**（证据可查）
@@ -59,6 +92,16 @@ curl -s http://127.0.0.1:18212/health
 4. 再上传一次 `normal_500.csv` → `duplicate_file`，写入 0 行；到 `/review` 点「验证重复导入」看只读判定。
 5. 勾选 `force_new_batch` 再传 `normal_500.csv` → 新批次，旧批次标 superseded。
 
+退货演示：
+
+1. `/returns` 上传 `return_beijing_1.csv` → 入账 4 行，站点汇总与订单台账同步更新。
+2. 再传 `return_beijing_2_conflict.csv` → 409，列出订单 700001 冲突（已退满后再退）；
+   页面同时展示回滚前旧汇总快照，证明旧账未改写。
+3. 传 `return_shanghai_1.csv` → 另一站点独立入账；再传 `return_shanghai_2_amount_conflict.csv`
+   → 件数未超但退款金额越界，409 回滚。
+4. 重复上传 `return_beijing_1.csv` → `duplicate_file`，累计值不变。
+5. 传 `return_multi_site.csv` → 422，混站文件须拆分后按站点单独提交。
+
 命令行等价（验收脚本用的就是这些）：
 
 ```bash
@@ -66,6 +109,10 @@ curl -s http://127.0.0.1:18212/health
 curl -s -F "file=@sample_data/normal_500.csv" -F "extra_policy=reject" http://127.0.0.1:18212/api/import
 curl -s -o /tmp/broken.json -w '%{http_code}\n' -F "file=@sample_data/broken.csv" http://127.0.0.1:18212/api/import
 python3 -c "import json;d=json.load(open('/tmp/broken.json'));print(d['report']['total'],[e['code'] for e in d['report']['rows']])"
+curl -s -F "file=@sample_data/return_beijing_1.csv" http://127.0.0.1:18212/api/returns/import
+curl -s -o /tmp/rc.json -w '%{http_code}\n' -F "file=@sample_data/return_beijing_2_conflict.csv" http://127.0.0.1:18212/api/returns/import
+python3 -c "import json;d=json.load(open('/tmp/rc.json'));print(d['status'],[c['order_id'] for c in d['conflicts']])"
+curl -s -F "file=@sample_data/return_beijing_1.csv" http://127.0.0.1:18212/api/returns/import
 ```
 
 ## API / 页面
@@ -79,16 +126,27 @@ python3 -c "import json;d=json.load(open('/tmp/broken.json'));print(d['report'][
 | POST | `/api/replay-check` | 按 sha256 判定「再次上传会不会重复」 |
 | GET | `/api/batches` | 批次列表 + 统计 |
 | GET | `/api/samples/{name}` | 样例下载 |
-| 页面 | `/`、`/workbench`、`/result/{batch_id}`、`/result/attempt/{id}`、`/review` | 首页/工作台/结果/错误明细/历史复核 |
+| POST | `/api/returns/import` | multipart：`file`、`extra_policy`、`declared_site`；200 已入账/重复文件、422 校验拒绝、409 累计越界回滚 |
+| POST | `/returns` | 退货页面表单；409 时渲染冲突订单清单与回滚前快照 |
+| POST | `/api/returns/contract-check` | 退货表头自检（独立入口） |
+| POST | `/api/returns/replay-check` | 按 sha256 判定退货文件重试结论 |
+| GET | `/api/returns` | 站点累计汇总 + 订单台账 + 退货批次/上传记录 |
+| GET | `/api/returns/order/{order_id}` | 单个订单的原始订单与累计退货台账 |
+| 页面 | `/`、`/workbench`、`/returns`、`/result/{batch_id}`、`/result/attempt/{id}`、`/review` | 首页/工作台/退货入账/结果/错误明细/历史复核 |
 
 ## 目录
 
 ```text
 app/            main.py settings.py pipeline.py seed.py
                 encoding.py contract.py rows.py aggregate.py importer.py report.py store.py
+                returns.py return_pipeline.py return_importer.py
                 templates/ static/
-sample_data/    normal_500.csv gbk_120.csv seed_20261107.csv broken.csv contract.json make_samples.py
-tests/          test_encoding.py test_rows.py test_importer.py test_api.py conftest.py
+sample_data/    normal_500.csv gbk_120.csv seed_20261107.csv broken.csv contract.json
+                return_beijing_1.csv return_beijing_2_conflict.csv
+                return_shanghai_1.csv return_shanghai_2_amount_conflict.csv return_multi_site.csv
+                make_samples.py
+tests/          test_encoding.py test_rows.py test_importer.py test_api.py
+                test_returns.py test_returns_api.py conftest.py
 Dockerfile docker-compose.yml requirements.txt .env.example
 ```
 
@@ -101,3 +159,6 @@ Dockerfile docker-compose.yml requirements.txt .env.example
   需要在契约里约定来源编码。
 - 单次上传上限 8MB（约 10 万行量级）；不做流式分片。
 - 明细与批次不提供删除接口；重灌靠 `force_new_batch` + `superseded_by` 追溯。
+- 退货累计上限按「首次退货时的原始订单」冻结；若上游事后修正订单件数/金额，需另行冲正台账
+  （当前不提供台账修订接口）。
+- 退货不提供撤销/冲正接口：已入账退货只能通过新文件退回剩余额度，`return_batches` 只增不改。

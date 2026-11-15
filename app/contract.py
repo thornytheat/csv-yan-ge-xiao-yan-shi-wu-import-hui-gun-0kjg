@@ -36,14 +36,23 @@ def normalize_header(cells: list[str]) -> list[str]:
 
 
 def check(header_cells: list[str], extra_policy: str = "reject") -> dict:
-    """返回契约检查结论；ok=True 才允许进入行校验。"""
+    """订单表头契约（兼容旧入口）。"""
+    return check_columns(header_cells, extra_policy, COLUMN_SPECS, REQUIRED)
+
+
+def check_columns(header_cells: list[str], extra_policy: str,
+                  specs: dict[str, dict], required: list[str]) -> dict:
+    """通用表头契约：列定义与必填列由调用方给出（订单 / 退货共用）。
+
+    返回契约检查结论；ok=True 才允许进入行校验。
+    """
     if extra_policy not in POLICIES:
         extra_policy = "reject"
 
     header = normalize_header(header_cells)
-    known = set(COLUMN_SPECS)
+    known = set(specs)
 
-    missing = [c for c in REQUIRED if c not in header]
+    missing = [c for c in required if c not in header]
     extra = [c for c in header if c not in known]
     duplicate = sorted({c for c in header if c and header.count(c) > 1}, key=header.index)
     blank = [i + 1 for i, c in enumerate(header) if not c]
@@ -68,7 +77,7 @@ def check(header_cells: list[str], extra_policy: str = "reject") -> dict:
     if missing:
         errors.append({
             "code": "missing_column",
-            "message": f"缺少必需列：{', '.join(missing)}。契约要求：{', '.join(REQUIRED)}。",
+            "message": f"缺少必需列：{', '.join(missing)}。契约要求：{', '.join(required)}。",
             "columns": missing,
         })
     if extra:
@@ -86,7 +95,7 @@ def check(header_cells: list[str], extra_policy: str = "reject") -> dict:
             })
 
     usable = [c for c in header if c in known and c not in duplicate]
-    reordered = [c for c in REQUIRED if c in usable] != [c for c in usable if c in REQUIRED]
+    reordered = [c for c in required if c in usable] != [c for c in usable if c in required]
 
     return {
         "ok": not errors,
@@ -103,7 +112,7 @@ def check(header_cells: list[str], extra_policy: str = "reject") -> dict:
             {"name": name, "required": spec["required"], "type": spec["type"],
              "label": spec["label"], "max_length": spec.get("max_length"),
              "enum": spec.get("enum")}
-            for name, spec in COLUMN_SPECS.items()
+            for name, spec in specs.items()
         ],
     }
 

@@ -104,6 +104,75 @@
 
     <section class="panel">
       <div class="panel-head">
+        <h2>退货上传记录（含越界冲突）</h2>
+        <div class="panel-actions">
+          <span class="tag">{{ return_attempts|length }} 条</span>
+          <a class="btn secondary small" href="/returns">退货入账</a>
+        </div>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead><tr><th>#</th><th>文件</th><th>结论</th><th>站点</th><th class="num">行数</th><th class="num">错误/冲突</th><th>时间</th></tr></thead>
+          <tbody>
+          {% for a in return_attempts %}
+            <tr>
+              <td>{{ a.attempt_id }}</td>
+              <td class="cell-ellipsis">{{ a.filename }}</td>
+              <td>
+                {% if a.status == 'committed' %}<span class="tag ok">已入账</span>
+                {% elif a.status == 'duplicate_file' %}<span class="tag warn">重复文件</span>
+                {% elif a.status == 'conflict' %}<span class="tag err">累计越界回滚</span>
+                {% elif a.status == 'rolled_back' %}<span class="tag err">事务回滚</span>
+                {% elif a.status == 'rejected' %}<span class="tag err">校验拒绝</span>
+                {% elif a.status == 'encoding_failed' %}<span class="tag err">编码失败</span>
+                {% else %}<span class="tag">{{ a.status }}</span>{% endif %}
+              </td>
+              <td class="small">{{ a.declared_site or '—' }}</td>
+              <td class="num">{{ a.row_count }}</td>
+              <td class="num">{{ a.error_count }}</td>
+              <td class="small muted nowrap">{{ a.created_at }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="7" class="muted">还没有退货上传记录。</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">conflict = 同一订单跨历史/并发批次累计退货越界：整份文件未写入，旧汇总与旧台账保持原值；同 sha256 重试返回 duplicate_file。</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>退货批次</h2>
+        <div class="panel-actions"><span class="tag">{{ return_batches|length }} 条</span></div>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead><tr><th>批号</th><th>文件</th><th>站点</th><th class="num">行数</th><th class="num">件数</th><th class="num">退款合计</th><th>时间</th></tr></thead>
+          <tbody>
+          {% for b in return_batches %}
+            <tr>
+              <td><code>{{ b.return_batch_id }}</code></td>
+              <td class="cell-ellipsis">{{ b.filename }}</td>
+              <td><span class="tag">{{ b.declared_site or '—' }}</span></td>
+              <td class="num">{{ b.row_count }}</td>
+              <td class="num">{{ b.total_qty }}</td>
+              <td class="num">¥{{ b.total_amount }}</td>
+              <td class="small muted nowrap">{{ b.created_at }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="7" class="muted">还没有退货批次。</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+    <section class="panel">
+      <div class="panel-head">
         <h2>上传记录（含回滚记录）</h2>
         <div class="panel-actions"><span class="tag">{{ attempts|length }} 条</span></div>
       </div>

@@ -1,0 +1,5 @@
+return_id,order_id,site,category,return_date,amount,qty
+300001,700001,beijing,electronics,2026-11-10,12.00,1
+300002,700007,beijing,electronics,2026-11-10,10.11,2
+300003,700013,beijing,electronics,2026-11-10,12.19,3
+300004,700019,beijing,electronics,2026-11-10,14.26,1

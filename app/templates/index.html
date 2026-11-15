@@ -41,6 +41,29 @@
   </div>
 </div>
 
+<div class="kpi-strip">
+  <div class="kpi">
+    <div class="k-label">退货批次</div>
+    <div class="k-value">{{ return_stats.return_batches }}</div>
+    <div class="k-note">return_batches · 按站点独立提交</div>
+  </div>
+  <div class="kpi ok">
+    <div class="k-label">累计退货</div>
+    <div class="k-value">{{ return_stats.return_qty }}</div>
+    <div class="k-note">{{ return_stats.return_rows }} 行明细 · ¥{{ return_stats.return_amount }}</div>
+  </div>
+  <div class="kpi {% if return_stats.conflict_attempts %}err{% endif %}">
+    <div class="k-label">退货越界回滚</div>
+    <div class="k-value">{{ return_stats.conflict_attempts }}</div>
+    <div class="k-note">conflict · 整份不写入</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">退货入口</div>
+    <div class="k-value" style="font-size:16px"><a href="/returns">退货入账 →</a></div>
+    <div class="k-note">订单/退货互不影响，累计统一受控</div>
+  </div>
+</div>
+
 <section class="panel">
   <div class="panel-head">
     <h2>最近批次</h2>
@@ -104,9 +127,33 @@
         </table>
       </div>
       <div class="panel-body tight">
-        <p class="small muted" style="margin:0">结论口径：committed 已入库；duplicate_file 同 sha256 幂等命中未写库；rolled_back / rejected 整份回滚，明细行数不变。</p>
+        <p class="small muted" style="margin:0">结论口径：committed 已入库；duplicate_file 同 sha256 幂等命中未写库；rolled_back / rejected 整份回滚，明细行数不变。退货入账同样整份事务，越界时整份回滚并列出冲突订单。</p>
       </div>
     </section>
+
+    {% if return_summary %}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>站点退货汇总</h2>
+        <div class="panel-actions"><a class="btn secondary small" href="/returns">退货入账</a></div>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead><tr><th>站点</th><th class="num">累计件数</th><th class="num">累计退款</th><th class="num">明细行数</th></tr></thead>
+          <tbody>
+          {% for s in return_summary %}
+            <tr>
+              <td><b>{{ s.site }}</b></td>
+              <td class="num">{{ s.qty }}</td>
+              <td class="num">¥{{ s.amount }}</td>
+              <td class="num">{{ s.row_count }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+    {% endif %}
   </div>
 
   <div>
@@ -127,6 +174,7 @@
           <li><b>1 份 = 1 事务</b>：任一行非法 → 整份回滚，明细行数不变。</li>
           <li><b>行号 + 列名</b>：每处错误都给文件行号、列名、原值、原因。</li>
           <li><b>sha256 幂等</b>：同一份文件重传不再写库，除非显式覆盖。</li>
+          <li><b>退货累计受控</b>：按订单跨历史/并发批次核对件数与退款金额，越界整份回滚并列冲突订单。</li>
         </ul>
       </div>
       <div class="panel-actions">

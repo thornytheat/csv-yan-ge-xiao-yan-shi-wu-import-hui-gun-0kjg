@@ -1,0 +1,262 @@
+{% extends "base.html" %}
+{% block title %}退货入账 · {{ app_name }}{% endblock %}
+{% block crumb %}退货入账{% endblock %}
+{% block meta %}<span class="dot {% if result and result.status in ('conflict','rejected','rolled_back','encoding_failed') %}err{% else %}ok{% endif %}"></span>退货明细 {{ return_stats.return_rows }} 行 · 累计 {{ return_stats.return_qty }} 件 · ¥{{ return_stats.return_amount }}{% endblock %}
+{% block actions %}
+<a class="btn secondary small" href="/api/samples/return_beijing_1.csv">下载 return_beijing_1.csv</a>
+<a class="btn secondary small" href="/workbench">订单上传</a>
+{% endblock %}
+{% block status_left %}各站点退货文件独立提交 · 同一订单跨批次累计受控 · 越界整份回滚并列出冲突订单{% endblock %}
+{% block status_right %}{{ app_name }}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">退货入账</h1>
+    <p class="page-sub">退货 CSV 按站点独立提交；每笔退货指向历史订单，件数与退款金额按订单跨历史/并发批次累计核对；任一越界整份回滚，旧汇总与旧账不变。</p>
+  </div>
+</div>
+
+<div class="kpi-strip">
+  <div class="kpi ok">
+    <div class="k-label">退货明细</div>
+    <div class="k-value">{{ return_stats.return_rows }}</div>
+    <div class="k-note">return_facts · 整份事务写入</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">累计退货件数</div>
+    <div class="k-value">{{ return_stats.return_qty }}</div>
+    <div class="k-note">跨批次累计</div>
+  </div>
+  <div class="kpi">
+    <div class="k-label">累计退款金额</div>
+    <div class="k-value" style="font-size:19px">¥{{ return_stats.return_amount }}</div>
+    <div class="k-note">cents 累加，无浮点误差</div>
+  </div>
+  <div class="kpi {% if return_stats.conflict_attempts %}err{% endif %}">
+    <div class="k-label">越界回滚次数</div>
+    <div class="k-value">{{ return_stats.conflict_attempts }}</div>
+    <div class="k-note">conflict · 未写入任何行</div>
+  </div>
+</div>
+
+<div class="split">
+  <section class="panel pane-sticky" id="r1">
+    <div class="panel-head">
+      <h2>提交退货文件</h2>
+      <div class="panel-actions"><span class="tag">按站点独立</span></div>
+    </div>
+    <div class="panel-body">
+      <form id="return-form" method="post" action="/returns" enctype="multipart/form-data">
+        <div class="field">
+          <label for="file">退货 CSV（表头只需覆盖 return_id / order_id / site / category / return_date / amount / qty）</label>
+          <input type="file" id="file" name="file" accept=".csv,text/csv" required>
+        </div>
+        <div class="field">
+          <label for="declared_site">申报站点（可选，填写后须与文件内容一致）</label>
+          <select id="declared_site" name="declared_site">
+            <option value="">不预校验（按文件内容站点）</option>
+            {% for s in sites %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="extra_policy">契约外列策略</label>
+          <select id="extra_policy" name="extra_policy">
+            <option value="reject">reject（默认）：出现契约外列即拒绝整份文件</option>
+            <option value="warn">warn：契约外列忽略并告警</option>
+          </select>
+        </div>
+        <details class="help">
+          <summary>退货样例与规则</summary>
+          <ul class="list small" style="margin-bottom:0">
+            {% for s in return_samples %}
+            <li><a href="/api/samples/{{ s.name }}">{{ s.name }}</a> —— {{ s.desc }}</li>
+            {% endfor %}
+          </ul>
+          <p class="small muted" style="margin:8px 0 0">
+            一份文件只允许一个站点；同一订单在同一文件里的多行会先合并再核对累计上限。
+            重试同一份文件（sha256 相同）返回 duplicate_file，不会重复入账。
+          </p>
+        </details>
+      </form>
+    </div>
+    <div class="panel-actions">
+      <button type="submit" id="return-submit-btn" form="return-form">校验并入账</button>
+      <span class="small muted" style="align-self:center">越界时整份回滚，列出冲突订单。</span>
+    </div>
+  </section>
+
+  <div>
+    {% if result %}
+    <section class="panel">
+      <div class="panel-head">
+        <h2>本次上传结论</h2>
+        <div class="panel-actions">
+          {% if result.status == 'committed' %}<span class="tag ok">已入账</span>
+          {% elif result.status == 'duplicate_file' %}<span class="tag warn">重复文件 · 未重复入账</span>
+          {% elif result.status == 'conflict' %}<span class="tag err">冲突 · 整份回滚</span>
+          {% elif result.status == 'rejected' %}<span class="tag err">校验拒绝</span>
+          {% else %}<span class="tag err">{{ result.status }}</span>{% endif %}
+        </div>
+      </div>
+      <div class="panel-body tight">
+        <p class="small" style="margin:0 0 6px">
+          文件 <b>{{ result.filename }}</b> ｜ sha256 <code class="mono">{{ result.sha256[:16] }}…</code>
+          {% if result.return_batch_id %}｜退货批次 <code>{{ result.return_batch_id }}</code>{% endif %}
+          ｜写入 <b>{{ result.written }}</b> 行
+          {% if result.rows_before is not none %}｜明细 {{ result.rows_before }} → {{ result.rows_after }} 行{% endif %}
+        </p>
+        {% if result.detail %}<p class="small muted" style="margin:0">{{ result.detail }}</p>{% endif %}
+        {% if result.duplicate_hint %}
+        <p class="small muted" style="margin:6px 0 0">{{ result.duplicate_hint }}</p>
+        {% endif %}
+      </div>
+      {% if result.aggregate %}
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead><tr><th>站点</th><th class="num">行数</th><th class="num">件数</th><th class="num">退款金额</th></tr></thead>
+          <tbody>
+            {% for g in result.aggregate.groups %}
+            <tr><td>{{ g.site }}</td><td class="num">{{ g.row_count }}</td><td class="num">{{ g.qty }}</td><td class="num">¥{{ g.amount }}</td></tr>
+            {% endfor %}
+          </tbody>
+          <tfoot><tr><th>合计</th><th class="num">{{ result.aggregate.row_count }}</th><th class="num">{{ result.aggregate.total_qty }}</th><th class="num">¥{{ result.aggregate.total_amount }}</th></tr></tfoot>
+        </table>
+      </div>
+      {% endif %}
+      {% if result.report and result.report.total %}
+      <div class="panel-body">
+        {% set report = result.report %}
+        {% include "_error_report.html" %}
+      </div>
+      {% elif result.contract and result.contract.errors %}
+      <div class="panel-body tight">
+        <p class="small" style="margin:0">退货表头契约未通过：{% for e in result.contract.errors %}<code>{{ e.code }}</code> {{ e.message }}{% if not loop.last %}；{% endif %}{% endfor %}</p>
+      </div>
+      {% endif %}
+    </section>
+    {% include "_return_conflicts.html" %}
+    {% endif %}
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>站点累计退货汇总</h2>
+        <div class="panel-actions"><span class="tag">return_site_totals · 与明细同事务</span></div>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead><tr><th>站点</th><th class="num">累计件数</th><th class="num">累计退款</th><th class="num">明细行数</th><th>最近批次</th><th>更新时间</th></tr></thead>
+          <tbody>
+          {% for s in summary %}
+            <tr>
+              <td><b>{{ s.site }}</b></td>
+              <td class="num">{{ s.qty }}</td>
+              <td class="num">¥{{ s.amount }}</td>
+              <td class="num">{{ s.row_count }}</td>
+              <td class="small">{{ s.last_return_batch_id or '—' }}</td>
+              <td class="small muted nowrap">{{ s.updated_at }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="6" class="muted">还没有退货入账。先上传 <a href="/api/samples/return_beijing_1.csv">return_beijing_1.csv</a> 试试。</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>订单累计退货台账</h2>
+        <div class="panel-actions"><span class="tag">return_order_totals · 跨批次统一受控</span></div>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead><tr><th class="num">订单号</th><th class="num">原件数</th><th class="num">已退件数</th><th class="num">剩余件数</th><th class="num">原金额</th><th class="num">已退金额</th><th class="num">剩余金额</th><th>最近批次</th></tr></thead>
+          <tbody>
+          {% for o in ledger %}
+            <tr>
+              <td class="num"><b>{{ o.order_id }}</b></td>
+              <td class="num">{{ o.order_qty }}</td>
+              <td class="num">{{ o.qty_returned }}</td>
+              <td class="num">{{ o.qty_remaining }}</td>
+              <td class="num">¥{{ o.order_amount }}</td>
+              <td class="num">¥{{ o.amount_returned }}</td>
+              <td class="num">¥{{ o.amount_remaining }}</td>
+              <td class="small">{{ o.last_return_batch_id or '—' }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="8" class="muted">台账为空：还没有订单发生退货。</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>退货批次</h2>
+        <div class="panel-actions"><span class="tag">{{ batches | length }} 条</span></div>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead><tr><th>批号</th><th>文件</th><th>站点</th><th>编码</th><th class="num">行数</th><th class="num">件数</th><th class="num">退款合计</th><th>时间</th></tr></thead>
+          <tbody>
+          {% for b in batches %}
+            <tr>
+              <td><code>{{ b.return_batch_id }}</code></td>
+              <td class="cell-ellipsis">{{ b.filename }}</td>
+              <td><span class="tag">{{ b.declared_site or '—' }}</span></td>
+              <td class="small">{{ b.encoding }}{% if b.bom %} BOM{% endif %}</td>
+              <td class="num">{{ b.row_count }}</td>
+              <td class="num">{{ b.total_qty }}</td>
+              <td class="num">¥{{ b.total_amount }}</td>
+              <td class="small muted nowrap">{{ b.created_at }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="8" class="muted">还没有退货批次。</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>退货上传记录</h2>
+        <div class="panel-actions"><span class="tag">{{ attempts | length }} 条</span></div>
+      </div>
+      <div class="table-wrap roomy">
+        <table class="dense">
+          <thead><tr><th>#</th><th>文件</th><th>结论</th><th>站点</th><th class="num">行数</th><th class="num">错误/冲突</th><th>时间</th></tr></thead>
+          <tbody>
+          {% for a in attempts %}
+            <tr>
+              <td>{{ a.attempt_id }}</td>
+              <td class="cell-ellipsis">{{ a.filename }}</td>
+              <td>
+                {% if a.status == 'committed' %}<span class="tag ok">已入账</span>
+                {% elif a.status == 'duplicate_file' %}<span class="tag warn">重复文件</span>
+                {% elif a.status == 'conflict' %}<span class="tag err">累计越界回滚</span>
+                {% elif a.status == 'rolled_back' %}<span class="tag err">事务回滚</span>
+                {% elif a.status == 'rejected' %}<span class="tag err">校验拒绝</span>
+                {% elif a.status == 'encoding_failed' %}<span class="tag err">编码失败</span>
+                {% else %}<span class="tag">{{ a.status }}</span>{% endif %}
+              </td>
+              <td class="small">{{ a.declared_site or '—' }}</td>
+              <td class="num">{{ a.row_count }}</td>
+              <td class="num">{{ a.error_count }}</td>
+              <td class="small muted nowrap">{{ a.created_at }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="7" class="muted">还没有退货上传记录。</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="panel-body tight">
+        <p class="small muted" style="margin:0">conflict 表示累计退货越界：整份文件未写入，站点汇总与订单台账保持上传前的旧值；同 sha256 重试返回 duplicate_file。</p>
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}

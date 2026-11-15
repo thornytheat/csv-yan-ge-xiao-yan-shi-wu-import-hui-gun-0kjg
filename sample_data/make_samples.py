@@ -6,6 +6,7 @@
 - seed_20261107.csv : 历史周批次，60 行（启动时幂等 seed 用）
 - broken.csv     : 5 类错误各 1 条，其余行合法
 - contract.json  : 列契约
+- return_*.csv   : 退货样例（引用 seed 历史订单 700001~700060）
 
 CSV 一律 \n 换行、无引号包裹（字段不含逗号/引号），行号与文件行可直接对应。
 """
@@ -19,6 +20,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 HEADER = ["site", "category", "order_id", "order_date", "amount", "qty"]
+RETURN_HEADER = ["return_id", "order_id", "site", "category", "return_date", "amount", "qty"]
 SITES = ["beijing", "shanghai", "guangzhou", "shenzhen", "chengdu", "hangzhou"]
 CATEGORIES = ["electronics", "grocery", "apparel"]
 
@@ -115,6 +117,67 @@ def broken_rows() -> list[list[str]]:
     ]
 
 
+# ---------------------------------------------------------------- 退货样例
+# seed 订单 700001~700060 的件数/金额分布见 seed_20261107.csv：
+# 每站点 10 单，件数 1~9，金额 12.00 起按 1.37 递增。退货样例只引用这些历史订单。
+
+def _seed_order(order_id: int) -> tuple[str, str, str, str, str]:
+    """复刻 make_samples.rows 中 seed 行的计算，便于生成受控退货样例。"""
+    i = order_id - 700001
+    site = SITES[i % len(SITES)]
+    category = CATEGORIES[(i * 7) % len(CATEGORIES)]
+    day = (date(2026, 10, 26) + timedelta(days=(i * 7 // 60) % 7)).isoformat()
+    return site, category, day, _amount(i), str(_qty(i))
+
+
+def _return_row(return_id: int, order_id: int, qty: int, amount: str,
+                when: str = "2026-11-10", site: str | None = None) -> list[str]:
+    o_site, category, _day, _amt, _qty_ = _seed_order(order_id)
+    return [str(return_id), str(order_id), site or o_site, category, when, amount, str(qty)]
+
+
+def return_rows_entry() -> list[list[str]]:
+    """beijing 站点：首次退货，全部在订单上限内（应成功入账）。"""
+    return [
+        _return_row(300001, 700001, 1, "12.00"),
+        _return_row(300002, 700007, 2, "10.11"),
+        _return_row(300003, 700013, 3, "12.19"),
+        _return_row(300004, 700019, 1, "14.26"),
+    ]
+
+
+def return_rows_retry() -> list[list[str]]:
+    """beijing 站点：再次提交，订单 700001 已退满，件数/金额双超 → 整份冲突回滚。"""
+    return [
+        _return_row(300011, 700025, 1, "16.33"),   # 本行本身合法
+        _return_row(300012, 700001, 1, "1.00"),    # 已退满 → 冲突
+        _return_row(300013, 700031, 1, "18.40"),
+    ]
+
+
+def return_rows_other_site() -> list[list[str]]:
+    """shanghai 站点：独立提交，与 beijing 文件互不影响。"""
+    return [
+        _return_row(300021, 700002, 4, "7.00"),
+        _return_row(300022, 700008, 1, "7.20"),
+    ]
+
+
+def return_rows_multi_site() -> list[list[str]]:
+    """混站文件：各站点须独立提交 → 整份拒绝。"""
+    return [
+        _return_row(300031, 700003, 1, "7.00"),
+        _return_row(300032, 700004, 1, "7.00"),
+    ]
+
+
+def return_rows_over_amount() -> list[list[str]]:
+    """shanghai 站点：件数仍在上限内，但累计退款金额越界 → 整份冲突回滚。"""
+    return [
+        _return_row(300041, 700002, 4, "8.00"),   # 4+4=8 件 ≤ 9，7.00+8.00=15.00 > 13.37
+    ]
+
+
 def main() -> None:
     write_csv(HERE / "normal_500.csv", HEADER,
               rows(500, 100001, date(2026, 11, 1), 13, memo=False), "utf-8")
@@ -123,6 +186,15 @@ def main() -> None:
     write_csv(HERE / "seed_20261107.csv", HEADER,
               rows(60, 700001, date(2026, 10, 26), 7, memo=False), "utf-8")
     write_csv(HERE / "broken.csv", HEADER, broken_rows(), "utf-8")
+    write_csv(HERE / "return_beijing_1.csv", RETURN_HEADER, return_rows_entry(), "utf-8")
+    write_csv(HERE / "return_beijing_2_conflict.csv", RETURN_HEADER,
+              return_rows_retry(), "utf-8")
+    write_csv(HERE / "return_shanghai_1.csv", RETURN_HEADER,
+              return_rows_other_site(), "utf-8")
+    write_csv(HERE / "return_multi_site.csv", RETURN_HEADER,
+              return_rows_multi_site(), "utf-8")
+    write_csv(HERE / "return_shanghai_2_amount_conflict.csv", RETURN_HEADER,
+              return_rows_over_amount(), "utf-8")
     (HERE / "contract.json").write_text(
         json.dumps(CONTRACT, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 

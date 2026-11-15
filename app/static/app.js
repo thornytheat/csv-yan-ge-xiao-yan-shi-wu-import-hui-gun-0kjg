@@ -120,6 +120,15 @@
     });
   }
 
+  // ---- 退货表单：同样防重复提交（幂等兜底在服务端，这里只是减少误触）
+  var returnForm = qs('#return-form');
+  if (returnForm) {
+    returnForm.addEventListener('submit', function () {
+      var btn = qs('#return-submit-btn');
+      if (btn) { btn.disabled = true; btn.textContent = '核对累计退货中…'; }
+    });
+  }
+
   // ---- 结果页：分段标签（聚合 / 探测证据 / 明细）
   qsa('[data-tab-target]').forEach(function (btn) {
     btn.addEventListener('click', function () {
